@@ -22,6 +22,7 @@ var/
 
 # Virtual Environment
 venv/
+venv311/
 ENV/
 
 # Environment variables
@@ -66,3 +67,7 @@ api_test.py
 *.bak
 *_new.py
 *_old.py
+
+# Development Artifacts
+atom-ai-patch.patch
+*.patch
