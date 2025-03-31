@@ -1,0 +1,82 @@
+import os
+import re
+import json
+import logging
+import httpx
+from typing import Optional, Dict, Any
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+class QuestionEngine:
+    """Enhanced question engine with workflow pattern awareness."""
+    
+    def __init__(self):
+        self.api_key = os.getenv("GEMINI_API_KEY")
+        self.steps = ['product', 'market', 'differentiation', 'company_size', 'linkedin', 'location', 'complete']
+        self.patterns_path = Path("workflows/patterns_v1.json")
+        
+        # Initialize with default templates
+        self.templates = {
+            'product': "What product or service do you sell?",
+            'market': "What market or industry do you target?",
+            'differentiation': "What makes your product unique compared to competitors?",
+            'company_size': "What size companies do you typically sell to? (e.g., SMB, Mid-Market, Enterprise)",
+            'linkedin': "Would you like to connect your LinkedIn account to improve recommendations?",
+            'location': "What zip code are you in? This helps us suggest local events. (You can skip this)",
+            'complete': "Awesome! I've gathered everything I need. Let's find some great companies for you."
+        }
+        
+        # Load patterns at initialization
+        self.workflow_patterns = self._load_patterns()
+
+    def _load_patterns(self) -> Dict[str, Any]:
+        """Load workflow patterns from JSON file."""
+        try:
+            if self.patterns_path.exists():
+                with open(self.patterns_path) as f:
+                    return json.load(f)
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to load workflow patterns: {str(e)}")
+            return {}
+
+    def _find_best_pattern(self, product_description: str) -> Optional[Dict[str, Any]]:
+        """Find the best matching workflow pattern for the product."""
+        if not product_description or not self.workflow_patterns.get("targeting_patterns"):
+            return None
+            
+        product_lower = product_description.lower()
+        
+        # Find the first pattern that matches product keywords
+        for pattern in self.workflow_patterns["targeting_patterns"]:
+            keywords = pattern.get("when_product_contains", "").lower().split("|")
+            if any(keyword.strip() in product_lower for keyword in keywords):
+                return pattern
+        return None
+
+    async def get_question(self, step: str) -> str:
+        """Get the standard question for a given step."""
+        return self.templates.get(step, "I have a question for you")
+
+    async def get_workflow_aware_question(self, step: str, product_description: str = "") -> str:
+        """Get question enhanced with workflow patterns if available."""
+        if step != "product" or not product_description:
+            return await self.get_question(step)
+            
+        pattern = self._find_best_pattern(product_description)
+        if not pattern:
+            return await self.get_question(step)
+            
+        # Customize based on pattern
+        base_question = await self.get_question(step)
+        if "ideal_customer" in pattern:
+            industries = ", ".join(pattern["ideal_customer"].get("industries", []))
+            return (
+                f"{base_question} "
+                f"(I notice your product might target {industries} - "
+                "tell me more about your ideal customers)"
+            )
+        return base_question

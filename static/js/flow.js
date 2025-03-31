@@ -40,6 +40,13 @@ function updateStepIndicators(currentStep) {
     });
 }
 
+// In your flow.js, you can now:
+function getSuggestedMessage(product) {
+    // Call to your backend which uses this WorkflowTrainer
+    return fetch('/api/suggest-message?product=' + encodeURIComponent(product))
+        .then(response => response.json());
+}
+
 async function submitCompany() {
     const company = document.getElementById('companyInput').value;
     if (!company) {

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}Error - Atom.ai{% endblock %}
+
+{% block content %}
+<div class="container py-24">
+    <div class="max-w-2xl mx-auto text-center">
+        <h1 class="text-4xl font-bold mb-6">Oops! Something went wrong</h1>
+        <p class="text-xl text-gray-300 mb-8">{{ error }}</p>
+        <a href="/" class="btn btn-primary">
+            <i class="bi bi-arrow-left"></i> Return to Home
+        </a>
+    </div>
+</div>
+{% endblock %}

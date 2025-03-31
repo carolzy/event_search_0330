@@ -1,471 +1,432 @@
-async function sendMessage() {
-    const userInput = document.getElementById('user-input').value.trim();
-    if (userInput === "") return;
+// Global variables
+let mediaRecorder = null;
+let audioChunks = [];
+let isRecording = false;
+let isListening = false;
+let speechRecognition = null;
+let currentStep = 'product';
+let ttsEnabled = true;
+
+// Audio recording configuration
+const audioConfig = {
+    type: 'audio/webm;codecs=opus',
+    sampleRate: 16000,
+    channelCount: 1,
+    bitsPerSecond: 16000
+};
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Set up event listeners
+    document.getElementById('user-input')?.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+            sendMessage();
+        }
+    });
+    
+    document.querySelector('.chat-send')?.addEventListener('click', sendMessage);
+    
+    setupSpeechRecognition();
+    
+    // Add event listener for record button
+    document.getElementById('recordButton')?.addEventListener('click', toggleRecording);
+    
+    // Init keywords display
+    initKeywordsDisplay();
+});
+
+// Initialize keywords display
+function initKeywordsDisplay() {
+    // Default keywords
+    const defaultKeywords = ["B2B Sales", "AI Assistant", "Lead Generation"];
+    updateKeywords(defaultKeywords);
+}
+
+// Function to send a message
+function sendMessage() {
+    const userInput = document.getElementById('user-input')?.value.trim();
+    if (!userInput) return;
     
     // Clear the input field
     document.getElementById('user-input').value = "";
     
-    // Append user message
-    appendMessage('user', userInput);
+    // Add user message to chat
+    addMessageToChat('user', userInput);
     
-    // Show loading indicator
-    const loadingElement = document.createElement('div');
-    loadingElement.className = 'chat-message bot-message loading';
-    loadingElement.innerHTML = '<div class="loading-dots"><span></span><span></span><span></span></div>';
-    document.getElementById('chat-messages').appendChild(loadingElement);
+    // Process the message
+    processUserInput(userInput);
+}
+
+// Process user input
+function processUserInput(text) {
+    // Get the current step
+    const step = document.getElementById('current-step')?.value || 'product';
     
-    // Scroll to the bottom of the chat
-    scrollChatToBottom();
+    // Show processing indicator
+    addMessageToChat('assistant', '<em>Processing...</em>', 'processing-message');
     
-    // Make API call to process the message
-    fetch('/api/message', {
+    // Call the voice interaction API
+    fetch('/api/voice_interaction', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ message: userInput }),
+        body: JSON.stringify({
+            text: text,
+            step: step
+        })
     })
     .then(response => response.json())
     .then(data => {
-        // Remove loading indicator
-        const loadingIndicator = document.querySelector('.loading');
-        if (loadingIndicator) {
-            loadingIndicator.remove();
-        }
+        // Remove processing indicator
+        removeProcessingMessage();
         
-        // Handle the response
         if (data.success) {
-            // Append the bot's message
-            appendMessage('bot', data.response);
+            // Add the assistant's message to the chat
+            addMessageToChat('assistant', data.text);
             
-            // Check if recommendations are available
-            if (data.has_recommendations || data.recommendations) {
-                showRecommendationsButton();
-                
-                if (data.has_recommendations) {
-                    appendMessage('bot', 'I've found some recommendations for you! Click the \'View Recommendations\' button to see them.');
+            // Update the current step if provided
+            if (data.next_step) {
+                if (document.getElementById('current-step')) {
+                    document.getElementById('current-step').value = data.next_step;
                 }
+                currentStep = data.next_step;
+                updateProgressIndicator(data.next_step);
+            }
+            
+            // Update keywords if provided
+            if (data.keywords && data.keywords.length > 0) {
+                updateKeywords(data.keywords);
+            }
+            
+            // Play audio response if available
+            if (data.audio && ttsEnabled) {
+                playAudioResponse(data.audio);
+            }
+            
+            // Check if recommendations are ready
+            if (data.completed || data.show_recommendations_tab) {
+                showRecommendationsButton();
             }
         } else {
-            // Display error message
-            appendMessage('bot', 'Sorry, there was an error processing your message.');
+            console.error("Error processing input:", data.error);
+            addMessageToChat('assistant', "I'm sorry, there was an error. Please try again.");
         }
-        
-        // Scroll to the bottom of the chat
-        scrollChatToBottom();
     })
     .catch(error => {
-        console.error('Error:', error);
-        // Remove loading indicator
-        const loadingIndicator = document.querySelector('.loading');
-        if (loadingIndicator) {
-            loadingIndicator.remove();
-        }
-        // Display error message
-        appendMessage('bot', 'Sorry, there was an error processing your message.');
-        // Scroll to the bottom of the chat
-        scrollChatToBottom();
+        // Remove processing indicator
+        removeProcessingMessage();
+        
+        console.error('Error processing input:', error);
+        addMessageToChat('assistant', "I'm sorry, there was an error. Please try again.");
     });
 }
 
-// Function to append a message to the chat
-function appendMessage(sender, message) {
-    // Get the chat messages container
+// Remove processing message
+function removeProcessingMessage() {
+    const processingMessage = document.querySelector('.processing-message');
+    if (processingMessage) {
+        processingMessage.remove();
+    }
+}
+
+// Initialize speech recognition
+function setupSpeechRecognition() {
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        speechRecognition = new SpeechRecognition();
+        speechRecognition.continuous = false;
+        speechRecognition.interimResults = true;
+        speechRecognition.lang = 'en-US';
+        
+        speechRecognition.onstart = function() {
+            isListening = true;
+            
+            // Visual feedback when recording
+            const recordButton = document.getElementById('recordButton');
+            if (recordButton) {
+                recordButton.classList.add('recording');
+                recordButton.classList.add('bg-red-500');
+                recordButton.classList.remove('bg-blue-500');
+            }
+        };
+        
+        speechRecognition.onresult = function(event) {
+            let interimTranscript = '';
+            let finalTranscript = '';
+            
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    finalTranscript += event.results[i][0].transcript;
+                } else {
+                    interimTranscript += event.results[i][0].transcript;
+                }
+            }
+            
+            // Update input field with transcript
+            const userInput = document.getElementById('user-input');
+            if (userInput) {
+                userInput.value = finalTranscript || interimTranscript;
+            }
+        };
+        
+        speechRecognition.onerror = function(event) {
+            console.error('Speech recognition error', event.error);
+            isListening = false;
+            
+            // Reset visual feedback
+            const recordButton = document.getElementById('recordButton');
+            if (recordButton) {
+                recordButton.classList.remove('recording');
+                recordButton.classList.remove('bg-red-500');
+                recordButton.classList.add('bg-blue-500');
+            }
+        };
+        
+        speechRecognition.onend = function() {
+            isListening = false;
+            
+            // Reset visual feedback
+            const recordButton = document.getElementById('recordButton');
+            if (recordButton) {
+                recordButton.classList.remove('recording');
+                recordButton.classList.remove('bg-red-500');
+                recordButton.classList.add('bg-blue-500');
+            }
+            
+            // Submit the transcript if available
+            const userInput = document.getElementById('user-input');
+            if (userInput && userInput.value.trim()) {
+                sendMessage();
+            }
+        };
+    } else {
+        console.error('Speech recognition not supported in this browser');
+        const recordButton = document.getElementById('recordButton');
+        if (recordButton) {
+            recordButton.disabled = true;
+            recordButton.title = "Speech recognition not supported in this browser";
+        }
+    }
+}
+
+// Toggle recording
+function toggleRecording() {
+    if (isListening) {
+        stopRecording();
+    } else {
+        startRecording();
+    }
+}
+
+// Start recording
+function startRecording() {
+    if (speechRecognition) {
+        try {
+            speechRecognition.start();
+        } catch (e) {
+            console.error('Error starting speech recognition:', e);
+        }
+    } else if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        // Fallback to MediaRecorder if SpeechRecognition is not available
+        navigator.mediaDevices.getUserMedia({ audio: true })
+            .then(stream => {
+                mediaRecorder = new MediaRecorder(stream);
+                
+                mediaRecorder.ondataavailable = event => {
+                    audioChunks.push(event.data);
+                };
+                
+                mediaRecorder.onstop = () => {
+                    processAudio();
+                };
+                
+                audioChunks = [];
+                mediaRecorder.start();
+                isRecording = true;
+                
+                // Visual feedback when recording
+                const recordButton = document.getElementById('recordButton');
+                if (recordButton) {
+                    recordButton.classList.add('recording');
+                    recordButton.classList.add('bg-red-500');
+                    recordButton.classList.remove('bg-blue-500');
+                }
+            })
+            .catch(error => {
+                console.error('Error accessing microphone:', error);
+                alert('Microphone access denied. Please check your browser permissions.');
+            });
+    }
+}
+
+// Stop recording
+function stopRecording() {
+    if (speechRecognition && isListening) {
+        try {
+            speechRecognition.stop();
+        } catch (e) {
+            console.error('Error stopping speech recognition:', e);
+        }
+    } else if (mediaRecorder && isRecording) {
+        mediaRecorder.stop();
+        isRecording = false;
+        
+        // Reset visual feedback
+        const recordButton = document.getElementById('recordButton');
+        if (recordButton) {
+            recordButton.classList.remove('recording');
+            recordButton.classList.remove('bg-red-500');
+            recordButton.classList.add('bg-blue-500');
+        }
+    }
+}
+
+// Process audio recording (for MediaRecorder fallback)
+async function processAudio() {
+    try {
+        // Create audio blob
+        const audioBlob = new Blob(audioChunks, { type: audioConfig.type });
+        
+        // Create FormData
+        const formData = new FormData();
+        formData.append('audio', audioBlob);
+        
+        // Add the current step
+        const step = document.getElementById('current-step')?.value || 'product';
+        formData.append('step', step);
+        
+        // Send audio to server
+        const response = await fetch('/api/process_audio', {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            // Add user message with transcription
+            addMessageToChat('user', data.transcript);
+            
+            // Process the response
+            if (data.response) {
+                // Add assistant message
+                addMessageToChat('assistant', data.response.text);
+                
+                // Update step if needed
+                if (data.response.next_step) {
+                    if (document.getElementById('current-step')) {
+                        document.getElementById('current-step').value = data.response.next_step;
+                    }
+                    currentStep = data.response.next_step;
+                    updateProgressIndicator(data.response.next_step);
+                }
+                
+                // Update keywords if provided
+                if (data.response.keywords && data.response.keywords.length > 0) {
+                    updateKeywords(data.response.keywords);
+                }
+                
+                // Play audio response if available
+                if (data.response.audio && ttsEnabled) {
+                    playAudioResponse(data.response.audio);
+                }
+            }
+        } else {
+            console.error('Error processing audio:', data.error);
+            addMessageToChat('assistant', "I'm sorry, I couldn't understand what you said. Please try again.");
+        }
+    } catch (error) {
+        console.error('Error processing audio:', error);
+        addMessageToChat('assistant', "I'm sorry, there was an error processing your voice input. Please try typing instead.");
+    }
+}
+
+// Add message to chat
+function addMessageToChat(role, message, className = '') {
     const chatMessages = document.getElementById('chat-messages');
-    if (!chatMessages) {
-        console.error('Chat messages container not found');
+    if (!chatMessages) return;
+    
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `mb-4 flex justify-${role === 'user' ? 'end' : 'start'} ${className}`;
+    
+    const bubble = document.createElement('div');
+    bubble.className = `max-w-sm rounded-2xl px-4 py-3 ${role === 'user' ? 'bg-blue-500' : 'bg-gray-800'} text-white`;
+    bubble.innerHTML = message; // Using innerHTML to support HTML in messages (like processing indicator)
+    
+    messageDiv.appendChild(bubble);
+    chatMessages.appendChild(messageDiv);
+    
+    // Scroll to the latest message
+    const container = document.querySelector('.overflow-y-auto');
+    if (container) {
+        container.scrollTop = container.scrollHeight;
+    }
+}
+
+// Play audio response
+function playAudioResponse(audioBase64) {
+    const audio = document.getElementById('audio-response');
+    if (!audio) return;
+    
+    audio.src = `data:audio/mpeg;base64,${audioBase64}`;
+    audio.play().catch(e => console.error('Error playing audio:', e));
+}
+
+// Update keywords
+function updateKeywords(keywords) {
+    if (!keywords || !Array.isArray(keywords) || keywords.length === 0) {
         return;
     }
     
-    // Create a new message element
-    const messageElement = document.createElement('div');
-    messageElement.className = `chat-message ${sender}-message`;
+    const keywordsContainer = document.getElementById('keywordsContainer');
+    if (!keywordsContainer) return;
     
-    // Format the message with links
-    let formattedMessage = message;
+    // Clear existing keywords
+    keywordsContainer.innerHTML = '';
     
-    // Convert URLs to clickable links
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    formattedMessage = formattedMessage.replace(urlRegex, function(url) {
-        return `<a href="${url}" target="_blank">${url}</a>`;
+    // Add new keywords with animation
+    keywords.forEach((keyword, index) => {
+        const span = document.createElement('span');
+        span.className = 'bg-gradient-to-r from-blue-500/20 to-teal-400/20 text-blue-300 px-3 py-1 rounded-full text-sm keyword-animate';
+        span.style.animationDelay = `${index * 0.1}s`;
+        span.textContent = keyword;
+        keywordsContainer.appendChild(span);
     });
-    
-    messageElement.innerHTML = formattedMessage;
-    
-    // Append the message to the chat
-    chatMessages.appendChild(messageElement);
-    
-    // Scroll to the bottom of the chat
-    scrollChatToBottom();
 }
 
-function scrollChatToBottom() {
-    const chatMessages = document.getElementById('chat-messages');
-    if (chatMessages) {
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
+// Update progress indicator
+function updateProgressIndicator(step) {
+    const dots = document.querySelectorAll('.progress-dot');
+    dots.forEach(dot => {
+        dot.classList.remove('active');
+        if (dot.dataset.step === step) {
+            dot.classList.add('active');
+        }
+    });
 }
 
+// Show recommendations button
 function showRecommendationsButton() {
-    // Show the recommendations button if it exists
-    const recommendationsBtn = document.getElementById('view-recommendations-btn');
-    if (recommendationsBtn) {
-        recommendationsBtn.classList.remove('d-none');
-        recommendationsBtn.classList.add('d-flex');
+    // Redirect to recommendations page or show a button
+    if (confirm('Your recommendations are ready! Would you like to view them now?')) {
+        window.location.href = '/recommendations';
     }
 }
 
-function generateRecommendations() {
-    // Show a loading message
-    appendMessage('bot', 'Generating recommendations...');
+// Toggle text-to-speech
+function toggleTTS() {
+    ttsEnabled = !ttsEnabled;
     
-    // Make API call to generate recommendations
-    fetch('/api/recommendations', {
-        method: 'GET',
-        headers: {
-            'Content-Type': 'application/json',
-        }
-    })
-    .then(response => response.json())
-    .then(data => {
-        // Check if recommendations were generated successfully
-        if (data && (Array.isArray(data) || data.companies || data.success)) {
-            appendMessage('bot', 'Recommendations are ready! Click the \'View Recommendations\' button to see them.');
-            showRecommendationsButton();
-            
-            // Optionally redirect to recommendations page
-            // window.location.href = "/recommendations";
-        } else if (data.error || data.message) {
-            // Display error message
-            appendMessage('bot', `Sorry, I couldn't generate recommendations: ${data.error || data.message}`);
-        } else {
-            // Generic error
-            appendMessage('bot', 'Sorry, I couldn\'t generate recommendations at this time.');
-        }
-        
-        // Scroll to the bottom of the chat
-        scrollChatToBottom();
-    })
-    .catch(error => {
-        console.error('Error generating recommendations:', error);
-        appendMessage('bot', 'Sorry, there was an error generating recommendations.');
-        scrollChatToBottom();
-    });
-}
-
-// Listen for Enter key in the input field
-document.addEventListener('DOMContentLoaded', function() {
-    const inputField = document.getElementById('user-input');
-    if (inputField) {
-        inputField.addEventListener('keypress', function(event) {
-            if (event.key === 'Enter') {
-                event.preventDefault();
-                sendMessage();
-            }
-        });
-    }
-    
-    // Set up event listeners for recommendations button
-    const recommendationsBtn = document.getElementById('view-recommendations-btn');
-    if (recommendationsBtn) {
-        recommendationsBtn.addEventListener('click', function() {
-            window.location.href = '/recommendations';
-        });
-    }
-    
-    // Set up event listeners for generate recommendations button
-    const generateRecommendationsBtn = document.getElementById('generate-recommendations-btn');
-    if (generateRecommendationsBtn) {
-        generateRecommendationsBtn.addEventListener('click', generateRecommendations);
-    }
-});
-
-// Helper function to check if the microphone is available and has permission
-async function checkMicrophonePermission() {
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        // Stop all tracks to release the microphone
-        stream.getTracks().forEach(track => track.stop());
-        return true;
-    } catch (error) {
-        console.error('Microphone permission error:', error);
-        return false;
+    // Update UI to reflect TTS state
+    const ttsToggle = document.getElementById('tts-toggle');
+    if (ttsToggle) {
+        ttsToggle.innerHTML = ttsEnabled 
+            ? '<i class="fas fa-volume-up"></i>' 
+            : '<i class="fas fa-volume-mute"></i>';
+        ttsToggle.title = ttsEnabled ? 'Voice on (click to turn off)' : 'Voice off (click to turn on)';
     }
 }
-
-// Initialize microphone permission check when page loads
-document.addEventListener('DOMContentLoaded', async function() {
-    const voiceButton = document.getElementById('voice-button');
-    if (voiceButton) {
-        // Check if microphone is supported
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            console.error('getUserMedia is not supported in this browser');
-            voiceButton.disabled = true;
-            voiceButton.title = 'Voice input not supported in your browser';
-            return;
-        }
-        
-        // Start with button enabled, permissions will be requested on click
-        voiceButton.disabled = false;
-    }
-});
-
-// Handle voice recognition
-function setupVoiceRecognition() {
-    const voiceButton = document.getElementById('voice-button');
-    const voiceFeedback = document.getElementById('voice-feedback');
-    const progressBar = document.getElementById('voice-progress');
-    const statusText = document.getElementById('voice-status');
-    
-    if (!voiceButton) return;
-    
-    let recognition;
-    try {
-        // Initialize speech recognition
-        if ('webkitSpeechRecognition' in window) {
-            recognition = new webkitSpeechRecognition();
-            recognition.continuous = false;
-            recognition.interimResults = true;
-            recognition.lang = 'en-US';
-            
-            let finalTranscript = '';
-            let isListening = false;
-            
-            recognition.onstart = function() {
-                isListening = true;
-                voiceFeedback.classList.remove('d-none');
-                statusText.textContent = 'Listening...';
-                progressBar.style.width = '0%';
-                voiceButton.classList.add('btn-danger');
-                voiceButton.classList.remove('btn-primary');
-                finalTranscript = '';
-                
-                // Animate progress bar
-                let progress = 0;
-                const interval = setInterval(() => {
-                    if (!isListening) {
-                        clearInterval(interval);
-                        return;
-                    }
-                    progress += 1;
-                    progressBar.style.width = `${Math.min(progress, 100)}%`;
-                    if (progress >= 100) {
-                        if (isListening) {
-                            recognition.stop();
-                        }
-                        clearInterval(interval);
-                    }
-                }, 50);
-            };
-            
-            recognition.onresult = function(event) {
-                let interimTranscript = '';
-                for (let i = event.resultIndex; i < event.results.length; ++i) {
-                    if (event.results[i].isFinal) {
-                        finalTranscript += event.results[i][0].transcript;
-                    } else {
-                        interimTranscript += event.results[i][0].transcript;
-                    }
-                }
-                
-                statusText.textContent = 'Listening: ' + (finalTranscript || interimTranscript);
-            };
-            
-            recognition.onerror = function(event) {
-                isListening = false;
-                voiceFeedback.classList.add('d-none');
-                voiceButton.classList.remove('btn-danger');
-                voiceButton.classList.add('btn-primary');
-                console.error('Speech recognition error', event.error);
-                
-                if (event.error === 'not-allowed') {
-                    // Show microphone permission dialog
-                    showMicrophonePermissionDialog();
-                }
-            };
-            
-            recognition.onend = function() {
-                isListening = false;
-                voiceFeedback.classList.add('d-none');
-                voiceButton.classList.remove('btn-danger');
-                voiceButton.classList.add('btn-primary');
-                statusText.textContent = 'Speech recognition ended';
-                
-                if (finalTranscript) {
-                    // Display the transcript in the message input
-                    const messageInput = document.getElementById('message');
-                    if (messageInput) {
-                        messageInput.value = finalTranscript;
-                    }
-                    
-                    // Get the current step from a hidden field or data attribute
-                    const currentStep = document.getElementById('current-step')?.value || 'product';
-                    
-                    // Send the voice interaction to the backend
-                    handleVoiceInteraction(finalTranscript, currentStep);
-                }
-            };
-            
-            voiceButton.addEventListener('click', function() {
-                if (isListening) {
-                    recognition.stop();
-                } else {
-                    try {
-                        recognition.start();
-                    } catch (e) {
-                        console.error('Error starting recognition:', e);
-                        showMicrophonePermissionDialog();
-                    }
-                }
-            });
-        } else {
-            voiceButton.style.display = 'none';
-            console.log('Speech recognition not supported');
-        }
-    } catch (e) {
-        console.error('Error setting up voice recognition:', e);
-        if (voiceButton) voiceButton.style.display = 'none';
-    }
-}
-
-// Handle voice interaction with backend
-async function handleVoiceInteraction(text, step) {
-    try {
-        // Show loading indicator
-        const chatMessages = document.getElementById('chat-messages');
-        if (chatMessages) {
-            appendMessage('user', text);
-            appendMessage('assistant', '<em>Processing...</em>');
-        }
-        
-        // Call the API
-        const response = await fetch('/api/voice_interaction', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                text: text,
-                step: step
-            })
-        });
-        
-        console.log('Voice interaction response status:', response.status);
-        
-        if (!response.ok) {
-            throw new Error(`Server responded with status ${response.status}`);
-        }
-        
-        const responseData = await response.json();
-        
-        // Update the chat with the assistant's response
-        if (chatMessages) {
-            // Remove the "Processing..." message
-            chatMessages.removeChild(chatMessages.lastChild);
-            
-            // Add the actual response
-            if (responseData.success) {
-                appendMessage('assistant', responseData.text);
-                
-                // Update the current step
-                if (responseData.next_step) {
-                    const currentStepInput = document.getElementById('current-step');
-                    if (currentStepInput) {
-                        currentStepInput.value = responseData.next_step;
-                    }
-                }
-                
-                // Play audio if available
-                if (responseData.audio) {
-                    playAudio(responseData.audio);
-                }
-                
-                // Show recommendations tab if available
-                if (responseData.show_recommendations_tab) {
-                    const recsButton = document.getElementById('view-recommendations-btn');
-                    if (recsButton) {
-                        recsButton.classList.remove('d-none');
-                        recsButton.classList.add('d-block');
-                    }
-                }
-            } else {
-                appendMessage('assistant', responseData.text || 'Sorry, I encountered an error. Please try again.');
-            }
-        }
-    } catch (error) {
-        console.error('Error in voice interaction:', error);
-        
-        // Remove the "Processing..." message if it exists
-        const chatMessages = document.getElementById('chat-messages');
-        if (chatMessages && chatMessages.lastChild) {
-            chatMessages.removeChild(chatMessages.lastChild);
-        }
-        
-        // Show error message
-        appendMessage('assistant', 'Sorry, I encountered an error processing your voice input. Please try text input instead.');
-    }
-}
-
-// Function to play audio from base64 string
-function playAudio(base64Audio) {
-    if (!base64Audio) return;
-    
-    try {
-        const audio = new Audio();
-        audio.src = 'data:audio/mp3;base64,' + base64Audio;
-        audio.play().catch(e => console.error('Error playing audio:', e));
-    } catch (e) {
-        console.error('Error setting up audio playback:', e);
-    }
-}
-
-// Function to show microphone permission dialog
-function showMicrophonePermissionDialog() {
-    const dialog = document.createElement('div');
-    dialog.className = 'mic-permission-dialog';
-    dialog.innerHTML = `
-        <div class="mic-permission-content">
-            <h4>Microphone Access Required</h4>
-            <p>This app needs access to your microphone for voice input.</p>
-            <p>Please click "Allow" when your browser asks for microphone permission.</p>
-            <p>If you've already denied permission, you'll need to reset it in your browser settings.</p>
-            <button id="mic-permission-close" class="btn btn-primary">Got it</button>
-        </div>
-    `;
-    
-    document.body.appendChild(dialog);
-    
-    document.getElementById('mic-permission-close').addEventListener('click', function() {
-        dialog.remove();
-    });
-}
-
-// Initialize voice recognition when the page loads
-document.addEventListener('DOMContentLoaded', function() {
-    setupVoiceRecognition();
-    
-    // Enable enter key to send message
-    const messageInput = document.getElementById('message');
-    if (messageInput) {
-        messageInput.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                document.getElementById('send-button').click();
-            }
-        });
-    }
-    
-    // Request microphone permission on page load
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        navigator.mediaDevices.getUserMedia({ audio: true })
-            .then(function(stream) {
-                // Permission granted, stop the stream
-                stream.getTracks().forEach(track => track.stop());
-                console.log('Microphone permission granted');
-            })
-            .catch(function(err) {
-                console.error('Microphone permission denied:', err);
-                showMicrophonePermissionDialog();
-            });
-    }
-}); 

@@ -1,214 +1,559 @@
-
-import os
+from typing import Dict, List, Optional, Any
 import logging
+import os
+import random
+import json
 import httpx
+from pathlib import Path
 from dotenv import load_dotenv
-from typing import List, Optional
+from question_engine_new import QuestionEngine
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
 class FlowController:
-    """Controls the onboarding flow and manages user input/state."""
-
+    """Controls the multi-step B2B sales flow"""
+    
+    _instance = None
+    
+    @classmethod
+    def get_instance(cls):
+        """Get singleton instance"""
+        if cls._instance is None:
+            cls._instance = FlowController()
+        return cls._instance
+    
     def __init__(self):
-        # User-provided data
+        """Initialize the flow controller."""
+        # Load API keys
+        self.gemini_api_key = os.getenv('GEMINI_API_KEY')
+        logger.info(f"Loaded Gemini API key: {self.gemini_api_key[:10] if self.gemini_api_key else 'Not found'}")
+        
+        # User data
         self.current_product_line = ""
-        self.current_website = ""
-        self.product_differentiation = ""
         self.current_sector = ""
         self.current_segment = ""
-        self.zip_code = ""
-        self.linkedin_consent = False
-        self.keywords: List[str] = []
-
-        # Internal state
-        self.conversation_memory: List[str] = []
-
-        # Define step order
-        self.steps = [
-            "product",
-            "website",
-            "differentiation",
-            "market",
-            "company_size",
-            "location",
-            "linkedin",
-            "complete"
-        ]
-        self.current_step_index = 0
-
-        # API key for Gemini
-        self.gemini_api_key = os.getenv("GEMINI_API_KEY")
-
-    def get_next_step(self, current_step: str) -> str:
-        """Return the next step in the flow after the current step."""
-        try:
-            index = self.steps.index(current_step)
-            if index < len(self.steps) - 1:
-                return self.steps[index + 1]
-            return "complete"
-        except ValueError:
-            return self.steps[0]  # default to first step if invalid
-
-    async def get_question(self, step: str) -> str:
-        """Return a dynamic or fallback question for the given step."""
-        fallback_questions = {
-            "product": "What product are you working on or selling?",
-            "website": "Do you have a website where I can learn more?",
-            "differentiation": "How is your product different from existing solutions?",
-            "market": "Which market or industry are you focused on?",
-            "company_size": "What size of companies are you targeting?",
-            "location": "What’s your zip code or city for local opportunities?",
-            "linkedin": "Would you like to connect your LinkedIn to personalize recommendations?",
-            "complete": "Awesome! Let me now generate your ideal company recommendations."
-        }
-
-        if step == "complete":
-            return fallback_questions["complete"]
-
-        if not self.gemini_api_key:
-            logger.warning("Gemini API key not found, using fallback question.")
-            return fallback_questions.get(step, "Tell me more.")
-
-        try:
-            prompt = self._build_question_prompt(step)
-            question = await self._call_gemini_api(prompt)
-            return question or fallback_questions.get(step, "Tell me more.")
-        except Exception as e:
-            logger.error(f"Gemini error for step {step}: {e}")
-            return fallback_questions.get(step, "Tell me more.")
-
-    def _build_question_prompt(self, step: str) -> str:
-        """Create a Gemini prompt based on current step and context."""
-        context_lines = [
-            f"Product: {self.current_product_line or 'N/A'}",
-            f"Market: {self.current_sector or 'N/A'}",
-            f"Company Size: {self.current_segment or 'N/A'}"
-        ]
-
-        return f"""
-        You are Atom, a friendly B2B onboarding assistant.
-
-        Context:
-        {chr(10).join(context_lines)}
-
-        Now generate a friendly, concise (1-2 sentences) and natural sounding question for this step: {step}
-
-        The question should be clear, engaging, and appropriate for a business founder.
-        Don't include your thought process in the output — only return the question.
-        """
-
-    async def _call_gemini_api(self, prompt: str) -> Optional[str]:
-        """Send prompt to Gemini Flash and return the generated text."""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={self.gemini_api_key}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.7,
-                "topP": 0.9,
-                "topK": 40,
-                "maxOutputTokens": 256
-            }
-        }
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(url, json=payload)
-            if response.status_code == 200:
-                result = response.json()
-                if "candidates" in result and result["candidates"]:
-                    return result["candidates"][0]["content"]["parts"][0]["text"]
-            else:
-                logger.error(f"Gemini API error: {response.status_code} - {response.text}")
-        return None
-
-    def get_hint_for_step(self, step: str) -> str:
-        """Provide a short example or tip for each step."""
-        hints = {
-            "product": "e.g., 'We help companies monitor AI model performance.'",
-            "website": "e.g., 'https://mystartup.com'",
-            "differentiation": "e.g., 'Unlike legacy tools, ours uses real-time signals.'",
-            "market": "e.g., 'Healthtech, fintech, or logistics startups'",
-            "company_size": "e.g., 'SMBs with 10-500 employees'",
-            "location": "e.g., '94103' or 'San Francisco Bay Area'",
-            "linkedin": "e.g., 'Yes' or 'Not right now'",
-            "complete": "You're all set!"
-        }
-        return hints.get(step, "")
-
-    def get_product(self): return self.current_product_line
-    def get_market(self): return self.current_sector
-    def get_company_size(self): return self.current_segment
-    def get_location(self): return self.zip_code
-    def get_keywords(self): return self.keywords
-    def get_linkedin_consent(self): return self.linkedin_consent
-
-    async def store_answer(self, step: str, answer: str):
-        """Store answer in the appropriate field."""
-        if step == "product":
-            self.current_product_line = answer
-        elif step == "website":
-            self.current_website = answer
-        elif step == "differentiation":
-            self.product_differentiation = answer
-        elif step == "market":
-            self.current_sector = answer
-        elif step == "company_size":
-            self.current_segment = answer
-        elif step == "location":
-            self.zip_code = answer
-        elif step == "linkedin":
-            self.linkedin_consent = answer.lower() in ["yes", "true", "sure"]
-        self.conversation_memory.append(f"{step}: {answer}")
-
-    async def process_voice_answer(self, transcription: str) -> str:
-        """Store current voice answer and move to next step."""
-        current_step = self.steps[self.current_step_index]
-        await self.store_answer(current_step, transcription)
-        self.current_step_index += 1
-        return self.steps[self.current_step_index] if self.current_step_index < len(self.steps) else "complete"
-
-    async def clean_keywords(self) -> List[str]:
-        """Generate cleaned keywords for recommendation."""
-        if not self.gemini_api_key:
-            return []
-        context = f"{self.current_product_line} {self.product_differentiation} {self.current_sector}"
-        return await self.generate_keywords(context)
-    async def generate_keywords(self, context: str) -> List[str]:
-        """Generate keywords using Gemini based on user context."""
-        if not self.gemini_api_key:
-            logger.warning("No Gemini API key for keyword generation.")
-            return []
-
-        prompt = f"""
-        Based on this context, generate relevant B2B targeting keywords:
-
-        {context}
-
-        Format your response as a comma-separated list of keywords only.
-        """
-
-        try:
-            response = await self._call_gemini_api(prompt)
-            return [kw.strip() for kw in response.split(',') if kw.strip()]
-        except Exception as e:
-            logger.error(f"Keyword generation failed: {e}")
-            return []
-
-    def reset(self):
-        """Reset all user-provided fields and memory."""
-        self.current_product_line = ""
-        self.current_website = ""
-        self.product_differentiation = ""
-        self.current_sector = ""
-        self.current_segment = ""
-        self.zip_code = ""
-        self.linkedin_consent = False
         self.keywords = []
+        self.linkedin_consent = False
+        self.zip_code = ""
+        
+        # Conversation memory
         self.conversation_memory = []
-        self.current_step_index = 0
-
-
+        self.context_summary = ""
+        
+        # Flow state
+        self.steps = [
+            'product',
+            'market',
+            'differentiation',
+            'company_size',
+            'linkedin',
+            'location',
+            'complete'
+        ]
+        
+        # Initialize the question engine
+        self.question_engine = QuestionEngine()
+    
+    async def get_next_step(self, current_step):
+        """Get the next step in the flow."""
+        try:
+            current_index = self.steps.index(current_step)
+            if current_index < len(self.steps) - 1:
+                return self.steps[current_index + 1]
+            else:
+                return 'complete'
+        except ValueError:
+            return 'product'  # Default to the first step if current_step is not found
+    
+    async def get_question(self, step: str) -> str:
+        """Get the question for the current step."""
+        try:
+            # Build context from previous answers
+            context = self._build_context()
+            
+            # Get the question from the question engine
+            question = await self.question_engine.get_question(step, context)
+            
+            return question
+            
+        except Exception as e:
+            logger.error(f"Error generating question: {str(e)}")
+            return self._get_fallback_question(f"We need to ask about: {step}")
+    
+    async def get_follow_up_question(self, step: str, previous_answer: str, follow_up_count: int = 0, suggest_next: bool = False) -> str:
+        """Get a follow-up question for the current step."""
+        try:
+            # Check if we should suggest moving to the next step
+            if suggest_next:
+                next_step = await self.get_next_step(step)
+                next_step_name = {
+                    'product': 'your target market',
+                    'market': 'what makes your product unique',
+                    'differentiation': 'your target company size',
+                    'company_size': 'LinkedIn integration',
+                    'linkedin': 'your location',
+                    'location': 'completing your setup'
+                }.get(next_step, 'the next step')
+                
+                return f"Thanks for that information. Would you like to add anything else or shall we move on to {next_step_name}?"
+            
+            # Check for signs of user impatience in the previous answer
+            impatience_indicators = [
+                "next", "move on", "continue", "skip", "enough", "let's go", 
+                "proceed", "done", "finished", "complete", "that's it", "that's all"
+            ]
+            
+            if any(indicator in previous_answer.lower() for indicator in impatience_indicators):
+                next_step = await self.get_next_step(step)
+                next_question = await self.get_question(next_step)
+                return f"Let's move on to the next question. {next_question}"
+            
+            # Use the Gemini API to generate a follow-up question
+            if not self.gemini_api_key:
+                logger.warning("No Gemini API key found. Using default follow-up questions.")
+                return "Can you tell me more about that?"
+            
+            # Generate a more conversational follow-up question based on the current context
+            prompt = f"""
+            You are a friendly B2B research assistant helping a user set up their company research preferences.
+            
+            Current context:
+            - Product/Service: {self.current_product_line or 'Not provided yet'}
+            - Target Market: {self.current_sector or 'Not provided yet'}
+            - Company Size: {self.current_segment or 'Not provided yet'}
+            
+            Current step: {step}
+            User's answer: "{previous_answer}"
+            Follow-up count: {follow_up_count + 1}
+            
+            Generate a brief, friendly follow-up question that helps clarify or expand on their answer.
+            Keep it concise (1 sentence max). Do not use technical jargon.
+            If this is the second follow-up (count = 1), make it a final clarification before moving on.
+            Do not include any thinking process in your response.
+            """
+            
+            follow_up = await self._call_gemini_api(prompt)
+            
+            return follow_up
+                
+        except Exception as e:
+            logger.error(f"Error generating follow-up question: {str(e)}")
+            return "Can you tell me more about that?"
+    
+    async def store_answer(self, step, answer):
+        """Store the user's answer for the current step."""
+        logger.info(f"Storing answer for step '{step}': '{answer}'")
+        
+        if step == 'product':
+            self.current_product_line = answer
+            logger.info(f"Updated current_product_line: '{self.current_product_line}'")
+            # Generate initial keywords based on product
+            try:
+                prompt = f"""
+                You are a B2B sales assistant helping to generate relevant keywords for targeting.
+                
+                Product/Service: {answer}
+                
+                Generate 15 highly relevant keywords or short phrases that would be useful for targeting 
+                potential customers based on this product information. Focus on industry terms, job roles, 
+                and specific needs that would be relevant to this product/service.
+                
+                Format your response as a simple JSON array of strings. Do not include any explanation, markdown formatting, or additional text.
+                Example: ["keyword1", "keyword2", "keyword3"]
+                """
+                response = await self._call_gemini_api(prompt)
+                self.keywords = await self._parse_keywords_response(response)
+                logger.info(f"Generated initial keywords from product: {self.keywords}")
+            except Exception as e:
+                logger.error(f"Error generating initial keywords: {str(e)}")
+                
+        elif step == 'market':
+            self.current_sector = answer
+            logger.info(f"Updated current_sector: '{self.current_sector}'")
+            # Update keywords based on product and market
+            try:
+                prompt = f"""
+                You are a B2B sales assistant helping to generate relevant keywords for targeting.
+                
+                Current context:
+                - Product/Service: {self.current_product_line}
+                - Target Market: {answer}
+                
+                Generate 15 highly relevant keywords or short phrases that would be useful for targeting 
+                potential customers based on this information. Focus on industry terms, job roles, 
+                and specific needs that would be relevant to this product/service in this market.
+                
+                Format your response as a simple JSON array of strings. Do not include any explanation, markdown formatting, or additional text.
+                Example: ["keyword1", "keyword2", "keyword3"]
+                """
+                response = await self._call_gemini_api(prompt)
+                new_keywords = await self._parse_keywords_response(response)
+                # Merge and deduplicate keywords
+                self.keywords = list(set(self.keywords + new_keywords))
+                logger.info(f"Updated keywords with market info: {self.keywords}")
+            except Exception as e:
+                logger.error(f"Error updating keywords with market info: {str(e)}")
+                
+        elif step == 'differentiation':
+            # Add to conversation memory for differentiation
+            self.conversation_memory.append({
+                'step': step,
+                'answer': answer
+            })
+            logger.info(f"Added differentiation to conversation_memory")
+            
+            # Update keywords based on product, market, and differentiation
+            try:
+                context = self._build_context()
+                prompt = f"""
+                You are a B2B sales assistant helping to generate relevant keywords for targeting.
+                
+                Current context:
+                - Product/Service: {context.get('product', '')}
+                - Target Market: {context.get('market', '')}
+                - Differentiation: {answer}
+                
+                Generate 15 highly relevant keywords or short phrases that would be useful for targeting 
+                potential customers based on this information. Focus on industry terms, job roles, 
+                and specific needs that would be relevant to this product/service with this differentiation.
+                
+                Format your response as a simple JSON array of strings. Do not include any explanation, markdown formatting, or additional text.
+                Example: ["keyword1", "keyword2", "keyword3"]
+                """
+                response = await self._call_gemini_api(prompt)
+                new_keywords = await self._parse_keywords_response(response)
+                # Merge and deduplicate keywords
+                self.keywords = list(set(self.keywords + new_keywords))
+                logger.info(f"Updated keywords with differentiation info: {self.keywords}")
+            except Exception as e:
+                logger.error(f"Error updating keywords with differentiation info: {str(e)}")
+            
+        elif step == 'company_size':
+            self.current_segment = answer
+            logger.info(f"Updated current_segment: '{self.current_segment}'")
+            
+            # Update keywords based on all information
+            try:
+                context = self._build_context()
+                prompt = f"""
+                You are a B2B sales assistant helping to generate relevant keywords for targeting.
+                
+                Current context:
+                - Product/Service: {context.get('product', '')}
+                - Target Market: {context.get('market', '')}
+                - Differentiation: {context.get('differentiation', '')}
+                - Company Size: {answer}
+                
+                Generate 15 highly relevant keywords or short phrases that would be useful for targeting 
+                potential customers based on this information. Focus on industry terms, job roles, 
+                and specific needs that would be relevant to this product/service for this company size.
+                
+                Format your response as a simple JSON array of strings. Do not include any explanation, markdown formatting, or additional text.
+                Example: ["keyword1", "keyword2", "keyword3"]
+                """
+                response = await self._call_gemini_api(prompt)
+                new_keywords = await self._parse_keywords_response(response)
+                # Merge and deduplicate keywords
+                self.keywords = list(set(self.keywords + new_keywords))
+                logger.info(f"Updated keywords with company size info: {self.keywords}")
+            except Exception as e:
+                logger.error(f"Error updating keywords with company size info: {str(e)}")
+            
+        elif step == 'linkedin':
+            self.linkedin_consent = answer.lower() in ['yes', 'y', 'true', 'sure', 'ok', 'okay']
+            logger.info(f"Updated linkedin_consent: {self.linkedin_consent}")
+        elif step == 'location':
+            self.zip_code = answer
+            logger.info(f"Updated zip_code: '{self.zip_code}'")
+        
+        # Add to conversation memory if not already added
+        if step != 'differentiation':  # We already added differentiation above
+            self.conversation_memory.append({
+                'step': step,
+                'answer': answer
+            })
+            logger.info(f"Added to conversation_memory, current memory: {self.conversation_memory}")
+    
+    async def _call_gemini_api(self, prompt):
+        """Call the Gemini API with a prompt and return the response."""
+        try:
+            if not self.gemini_api_key:
+                logger.warning("No Gemini API key found.")
+                return ""
+                
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={self.gemini_api_key}",
+                    json={
+                        "contents": [
+                            {
+                                "role": "user",
+                                "parts": [{"text": prompt}]
+                            }
+                        ],
+                        "generationConfig": {
+                            "temperature": 0.2,
+                            "topP": 0.8,
+                            "topK": 40,
+                            "maxOutputTokens": 1024
+                        }
+                    }
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if "candidates" in data and len(data["candidates"]) > 0:
+                        candidate = data["candidates"][0]
+                        if "content" in candidate and "parts" in candidate["content"]:
+                            parts = candidate["content"]["parts"]
+                            if parts and "text" in parts[0]:
+                                text = parts[0]["text"].strip()
+                                # Remove markdown code blocks if present
+                                if text.startswith("```") and text.endswith("```"):
+                                    # Extract content between code blocks
+                                    lines = text.split("\n")
+                                    if len(lines) > 2:  # At least 3 lines (opening, content, closing)
+                                        # Remove first and last lines (```json and ```)
+                                        text = "\n".join(lines[1:-1]).strip()
+                                return text
+                
+                logger.error(f"Gemini API error: {response.status_code} {response.text}")
+                return ""
+        except Exception as e:
+            logger.error(f"Error calling Gemini API: {str(e)}")
+            return ""
+    
+    def _get_fallback_question(self, prompt):
+        """Get a fallback question if the Gemini API call fails."""
+        step = "unknown"
+        lines = prompt.split('\n')
+        if any("We need to ask about:" in line for line in lines):
+            step_line = [line for line in lines if "We need to ask about:" in line]
+            if step_line:
+                step = step_line[0].split(':')[1].strip()
+        
+        fallback_questions = {
+            'product': "What product or service are you selling?",
+            'market': "Which market or industry are you targeting?",
+            'differentiation': "What makes your product unique compared to competitors?",
+            'company_size': "What size of companies are you focusing on?",
+            'keywords': "Here are some keywords I've generated based on your input. Would you like to edit them?",
+            'linkedin': "Would you like to include LinkedIn profiles in your research?",
+            'location': "What's your zip code for location-based insights? (Type 'skip' to skip this step)",
+            'unknown': "What else would you like to tell me about your needs?"
+        }
+        
+        return fallback_questions.get(step, fallback_questions['unknown'])
+    
+    async def _parse_keywords_response(self, response):
+        """Parse keywords from the API response."""
+        try:
+            # Try to parse as JSON
+            # First, clean the response if it still has markdown or other formatting
+            cleaned_response = response.strip()
+            if cleaned_response.startswith('```') and '```' in cleaned_response[3:]:
+                # Extract content between markdown code blocks
+                logger.info("Detected markdown code block, cleaning response")
+                cleaned_response = cleaned_response.split('```', 2)[1]
+                if '\n' in cleaned_response:
+                    cleaned_response = cleaned_response.split('\n', 1)[1]
+                cleaned_response = cleaned_response.strip()
+            
+            logger.info(f"Cleaned response for JSON parsing: {cleaned_response}")
+            
+            # Now try to parse the JSON
+            if cleaned_response.startswith("[") and cleaned_response.endswith("]"):
+                keywords = json.loads(cleaned_response)
+                if isinstance(keywords, list) and all(isinstance(k, str) for k in keywords):
+                    logger.info(f"Successfully parsed keywords from JSON: {keywords}")
+                    return keywords
+                else:
+                    logger.warning(f"Parsed JSON is not a list of strings: {keywords}")
+            else:
+                logger.warning(f"Cleaned response is not a valid JSON array: {cleaned_response}")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON response: {e}, response: {cleaned_response}")
+        
+        # Fallback: extract keywords from text response
+        logger.info("Using fallback method to extract keywords from text")
+        keywords = response.replace("[", "").replace("]", "").replace("\"", "").split(",")
+        keywords = [k.strip() for k in keywords if k.strip()]
+        if keywords:
+            logger.info(f"Extracted keywords using fallback method: {keywords}")
+            return keywords
+        else:
+            logger.warning("Failed to extract keywords from response")
+            return ["B2B", "sales", "marketing", "lead generation"]
+    
+    def _add_to_conversation_memory(self, step, answer):
+        """Add a step and answer to the conversation memory."""
+        self.conversation_memory.append({
+            'step': step,
+            'answer': answer
+        })
+        
+        # Update the context summary
+        self._update_context_summary()
+    
+    def _update_context_summary(self):
+        """Update the context summary based on the conversation memory."""
+        try:
+            summary = ""
+            for item in self.conversation_memory:
+                step = item['step']
+                answer = item['answer']
+                
+                if step == 'product':
+                    summary += f"Product/Service: {answer}\n"
+                elif step == 'market':
+                    summary += f"Target Market: {answer}\n"
+                elif step == 'differentiation':
+                    summary += f"Unique Value Proposition: {answer}\n"
+                elif step == 'company_size':
+                    summary += f"Target Company Size: {answer}\n"
+                elif step == 'linkedin':
+                    summary += f"LinkedIn Consent: {answer}\n"
+                elif step == 'location':
+                    summary += f"Location: {answer}\n"
+            
+            self.context_summary = summary
+        except Exception as e:
+            logger.error(f"Error updating context summary: {str(e)}")
+    
+    async def _update_keywords(self, step, answer):
+        """Update keywords based on the current context."""
+        try:
+            # Build context from previous answers
+            context = self._build_context()
+            logger.info(f"Context for keyword generation: {context}")
+            
+            # Only update keywords for relevant steps
+            if step not in ['product', 'market', 'differentiation', 'company_size']:
+                logger.info(f"Step '{step}' not relevant for keyword generation, skipping")
+                return
+            
+            if not self.gemini_api_key:
+                logger.warning("No Gemini API key found. Using default keywords.")
+                self.keywords = ["B2B", "sales", "marketing", "lead generation"]
+                return
+            
+            # Generate keywords using Gemini API
+            prompt = f"""
+            You are a B2B sales assistant helping to generate relevant keywords for targeting.
+            
+            Current context:
+            - Product/Service: {context.get('product', '')}
+            - Target Market: {context.get('market', '')}
+            - Differentiation: {context.get('differentiation', '')}
+            - Company Size: {context.get('company_size', '')}
+            
+            Most recent update - Step: {step}, Answer: "{answer}"
+            
+            Generate 15 highly relevant keywords or short phrases that would be useful for targeting 
+            potential customers based on this information. Focus on industry terms, job roles, 
+            and specific needs that would be relevant to this product/service.
+            
+            Format your response as a simple JSON array of strings. Do not include any explanation, markdown formatting, or additional text.
+            Example: ["keyword1", "keyword2", "keyword3"]
+            """
+            
+            logger.info(f"Sending prompt to Gemini API for keyword generation")
+            response = await self._call_gemini_api(prompt)
+            logger.info(f"Raw Gemini API response: {response}")
+            
+            try:
+                # Try to parse as JSON
+                # First, clean the response if it still has markdown or other formatting
+                cleaned_response = response.strip()
+                if cleaned_response.startswith('```') and '```' in cleaned_response[3:]:
+                    # Extract content between markdown code blocks
+                    logger.info("Detected markdown code block, cleaning response")
+                    cleaned_response = cleaned_response.split('```', 2)[1]
+                    if '\n' in cleaned_response:
+                        cleaned_response = cleaned_response.split('\n', 1)[1]
+                    cleaned_response = cleaned_response.strip()
+                
+                logger.info(f"Cleaned response for JSON parsing: {cleaned_response}")
+                
+                # Now try to parse the JSON
+                if cleaned_response.startswith("[") and cleaned_response.endswith("]"):
+                    keywords = json.loads(cleaned_response)
+                    if isinstance(keywords, list) and all(isinstance(k, str) for k in keywords):
+                        self.keywords = keywords
+                        logger.info(f"Successfully parsed keywords from JSON: {self.keywords}")
+                        return
+                    else:
+                        logger.warning(f"Parsed JSON is not a list of strings: {keywords}")
+                else:
+                    logger.warning(f"Cleaned response is not a valid JSON array: {cleaned_response}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse JSON response: {e}, response: {cleaned_response}")
+            
+            # Fallback: extract keywords from text response
+            logger.info("Using fallback method to extract keywords from text")
+            keywords = response.replace("[", "").replace("]", "").replace("\"", "").split(",")
+            keywords = [k.strip() for k in keywords if k.strip()]
+            if keywords:
+                self.keywords = keywords
+                logger.info(f"Extracted keywords using fallback method: {self.keywords}")
+            else:
+                logger.warning("Failed to extract keywords from response")
+        except Exception as e:
+            logger.error(f"Error updating keywords: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    def _build_context(self):
+        """Build context from previous answers."""
+        context = {}
+        
+        if self.current_product_line:
+            context['product'] = self.current_product_line
+        
+        if self.current_sector:
+            context['market'] = self.current_sector
+        
+        if self.current_segment:
+            context['company_size'] = self.current_segment
+        
+        # Add differentiation from conversation memory if available
+        for item in self.conversation_memory:
+            if item['step'] == 'differentiation':
+                context['differentiation'] = item['answer']
+                break
+        
+        if self.linkedin_consent:
+            context['linkedin_consent'] = True
+        
+        if self.zip_code:
+            context['zip_code'] = self.zip_code
+        
+        return context
+    
+    async def clean_keywords(self):
+        """Clean up keywords and return them."""
+        # Remove duplicates and empty strings
+        cleaned_keywords = list(set([k.strip() for k in self.keywords if k.strip()]))
+        
+        # Sort alphabetically
+        cleaned_keywords.sort()
+        
+        return cleaned_keywords
+    
+    async def reset(self):
+        """Reset the flow controller."""
+        self.current_product_line = ""
+        self.current_sector = ""
+        self.current_segment = ""
+        self.keywords = []
+        self.linkedin_consent = False
+        self.zip_code = ""
+        self.conversation_memory = []
+        self.context_summary = ""
+        
+        return True
