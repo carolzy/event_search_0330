@@ -6,7 +6,8 @@ import json
 import httpx
 from pathlib import Path
 from dotenv import load_dotenv
-from question_engine_new import QuestionEngine
+from question_engine import QuestionEngine
+import traceback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -171,6 +172,8 @@ class FlowController:
                 logger.info(f"Generated initial keywords from product: {self.keywords}")
             except Exception as e:
                 logger.error(f"Error generating initial keywords: {str(e)}")
+                # Set default fallback keywords
+                self.keywords = ["B2B", "Sales", "Marketing", "Lead Generation"]
                 
         elif step == 'market':
             self.current_sector = answer
@@ -283,8 +286,9 @@ class FlowController:
         """Call the Gemini API with a prompt and return the response."""
         try:
             if not self.gemini_api_key:
-                logger.warning("No Gemini API key found.")
-                return ""
+                logger.warning("No Gemini API key found. Using fallback default response.")
+                # Return a simple JSON-formatted array of default keywords
+                return '["B2B", "Sales", "Marketing", "Lead Generation", "Customer Acquisition"]'
                 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -302,7 +306,8 @@ class FlowController:
                             "topK": 40,
                             "maxOutputTokens": 1024
                         }
-                    }
+                    },
+                    timeout=10.0  # Increased timeout for more reliable API calls
                 )
                 
                 if response.status_code == 200:
@@ -323,10 +328,13 @@ class FlowController:
                                 return text
                 
                 logger.error(f"Gemini API error: {response.status_code} {response.text}")
-                return ""
+                # Return a fallback value in case of API error
+                return '["B2B", "Sales", "Marketing", "Technology"]'
         except Exception as e:
             logger.error(f"Error calling Gemini API: {str(e)}")
-            return ""
+            logger.error(traceback.format_exc())
+            # Return a fallback value in case of exception
+            return '["B2B", "Sales", "Marketing", "Technology"]'
     
     def _get_fallback_question(self, prompt):
         """Get a fallback question if the Gemini API call fails."""
@@ -353,8 +361,10 @@ class FlowController:
     async def _parse_keywords_response(self, response):
         """Parse keywords from the API response."""
         try:
-            # Try to parse as JSON
-            # First, clean the response if it still has markdown or other formatting
+            # Log the original response for debugging
+            logger.info(f"Original API response: {response}")
+            
+            # Clean up the response if it contains markdown
             cleaned_response = response.strip()
             if cleaned_response.startswith('```') and '```' in cleaned_response[3:]:
                 # Extract content between markdown code blocks
@@ -363,150 +373,47 @@ class FlowController:
                 if '\n' in cleaned_response:
                     cleaned_response = cleaned_response.split('\n', 1)[1]
                 cleaned_response = cleaned_response.strip()
+                
+                # Remove trailing code block marker if present
+                if cleaned_response.endswith('```'):
+                    cleaned_response = cleaned_response[:-3].strip()
             
             logger.info(f"Cleaned response for JSON parsing: {cleaned_response}")
             
-            # Now try to parse the JSON
+            # Try to parse the cleaned response as JSON
             if cleaned_response.startswith("[") and cleaned_response.endswith("]"):
-                keywords = json.loads(cleaned_response)
-                if isinstance(keywords, list) and all(isinstance(k, str) for k in keywords):
-                    logger.info(f"Successfully parsed keywords from JSON: {keywords}")
-                    return keywords
-                else:
-                    logger.warning(f"Parsed JSON is not a list of strings: {keywords}")
-            else:
-                logger.warning(f"Cleaned response is not a valid JSON array: {cleaned_response}")
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON response: {e}, response: {cleaned_response}")
-        
-        # Fallback: extract keywords from text response
-        logger.info("Using fallback method to extract keywords from text")
-        keywords = response.replace("[", "").replace("]", "").replace("\"", "").split(",")
-        keywords = [k.strip() for k in keywords if k.strip()]
-        if keywords:
-            logger.info(f"Extracted keywords using fallback method: {keywords}")
-            return keywords
-        else:
-            logger.warning("Failed to extract keywords from response")
-            return ["B2B", "sales", "marketing", "lead generation"]
-    
-    def _add_to_conversation_memory(self, step, answer):
-        """Add a step and answer to the conversation memory."""
-        self.conversation_memory.append({
-            'step': step,
-            'answer': answer
-        })
-        
-        # Update the context summary
-        self._update_context_summary()
-    
-    def _update_context_summary(self):
-        """Update the context summary based on the conversation memory."""
-        try:
-            summary = ""
-            for item in self.conversation_memory:
-                step = item['step']
-                answer = item['answer']
-                
-                if step == 'product':
-                    summary += f"Product/Service: {answer}\n"
-                elif step == 'market':
-                    summary += f"Target Market: {answer}\n"
-                elif step == 'differentiation':
-                    summary += f"Unique Value Proposition: {answer}\n"
-                elif step == 'company_size':
-                    summary += f"Target Company Size: {answer}\n"
-                elif step == 'linkedin':
-                    summary += f"LinkedIn Consent: {answer}\n"
-                elif step == 'location':
-                    summary += f"Location: {answer}\n"
-            
-            self.context_summary = summary
-        except Exception as e:
-            logger.error(f"Error updating context summary: {str(e)}")
-    
-    async def _update_keywords(self, step, answer):
-        """Update keywords based on the current context."""
-        try:
-            # Build context from previous answers
-            context = self._build_context()
-            logger.info(f"Context for keyword generation: {context}")
-            
-            # Only update keywords for relevant steps
-            if step not in ['product', 'market', 'differentiation', 'company_size']:
-                logger.info(f"Step '{step}' not relevant for keyword generation, skipping")
-                return
-            
-            if not self.gemini_api_key:
-                logger.warning("No Gemini API key found. Using default keywords.")
-                self.keywords = ["B2B", "sales", "marketing", "lead generation"]
-                return
-            
-            # Generate keywords using Gemini API
-            prompt = f"""
-            You are a B2B sales assistant helping to generate relevant keywords for targeting.
-            
-            Current context:
-            - Product/Service: {context.get('product', '')}
-            - Target Market: {context.get('market', '')}
-            - Differentiation: {context.get('differentiation', '')}
-            - Company Size: {context.get('company_size', '')}
-            
-            Most recent update - Step: {step}, Answer: "{answer}"
-            
-            Generate 15 highly relevant keywords or short phrases that would be useful for targeting 
-            potential customers based on this information. Focus on industry terms, job roles, 
-            and specific needs that would be relevant to this product/service.
-            
-            Format your response as a simple JSON array of strings. Do not include any explanation, markdown formatting, or additional text.
-            Example: ["keyword1", "keyword2", "keyword3"]
-            """
-            
-            logger.info(f"Sending prompt to Gemini API for keyword generation")
-            response = await self._call_gemini_api(prompt)
-            logger.info(f"Raw Gemini API response: {response}")
-            
-            try:
-                # Try to parse as JSON
-                # First, clean the response if it still has markdown or other formatting
-                cleaned_response = response.strip()
-                if cleaned_response.startswith('```') and '```' in cleaned_response[3:]:
-                    # Extract content between markdown code blocks
-                    logger.info("Detected markdown code block, cleaning response")
-                    cleaned_response = cleaned_response.split('```', 2)[1]
-                    if '\n' in cleaned_response:
-                        cleaned_response = cleaned_response.split('\n', 1)[1]
-                    cleaned_response = cleaned_response.strip()
-                
-                logger.info(f"Cleaned response for JSON parsing: {cleaned_response}")
-                
-                # Now try to parse the JSON
-                if cleaned_response.startswith("[") and cleaned_response.endswith("]"):
+                try:
                     keywords = json.loads(cleaned_response)
                     if isinstance(keywords, list) and all(isinstance(k, str) for k in keywords):
-                        self.keywords = keywords
-                        logger.info(f"Successfully parsed keywords from JSON: {self.keywords}")
-                        return
+                        logger.info(f"Successfully parsed keywords from JSON: {keywords}")
+                        return keywords
                     else:
                         logger.warning(f"Parsed JSON is not a list of strings: {keywords}")
-                else:
-                    logger.warning(f"Cleaned response is not a valid JSON array: {cleaned_response}")
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse JSON response: {e}, response: {cleaned_response}")
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse JSON response: {e}, response: {cleaned_response}")
             
-            # Fallback: extract keywords from text response
+            # If JSON parsing failed, try to extract keywords manually
             logger.info("Using fallback method to extract keywords from text")
-            keywords = response.replace("[", "").replace("]", "").replace("\"", "").split(",")
-            keywords = [k.strip() for k in keywords if k.strip()]
+            
+            # Remove brackets and quotes
+            text = response.replace("[", "").replace("]", "").replace('"', "").replace("'", "")
+            
+            # Split by commas
+            keywords = [k.strip() for k in text.split(",") if k.strip()]
+            
             if keywords:
-                self.keywords = keywords
-                logger.info(f"Extracted keywords using fallback method: {self.keywords}")
-            else:
-                logger.warning("Failed to extract keywords from response")
+                logger.info(f"Extracted keywords using fallback method: {keywords}")
+                return keywords
+            
+            # If all else fails, return default keywords
+            logger.warning("Failed to extract keywords, using defaults")
+            return ["B2B", "Sales", "Marketing", "Lead Generation"]
+            
         except Exception as e:
-            logger.error(f"Error updating keywords: {str(e)}")
-            import traceback
+            logger.error(f"Error parsing keywords: {str(e)}")
             logger.error(traceback.format_exc())
+            # Return default keywords in case of any exception
+            return ["B2B", "Sales", "Marketing", "Technology", "Solutions"]
     
     def _build_context(self):
         """Build context from previous answers."""
@@ -542,6 +449,14 @@ class FlowController:
         
         # Sort alphabetically
         cleaned_keywords.sort()
+        
+        # Log the cleaned keywords
+        logger.info(f"Cleaned keywords: {cleaned_keywords}")
+        
+        # If we still have no keywords, provide some defaults
+        if not cleaned_keywords:
+            logger.warning("No keywords after cleaning, using defaults")
+            cleaned_keywords = ["B2B", "Sales", "Marketing", "Lead Generation"]
         
         return cleaned_keywords
     

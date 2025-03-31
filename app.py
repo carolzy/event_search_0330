@@ -59,7 +59,8 @@ async def onboarding_step():
         "success": True,
         "step": next_step,
         "question": question,
-        "audio": audio_data
+        "audio": audio_data,
+        "keywords": flow_controller.keywords  # Always include current keywords
     })
 
 @app.route("/api/get_question", methods=["GET"])
@@ -71,7 +72,7 @@ async def get_question():
         "success": True,
         "question": question,
         "audio": audio_data,
-        "keywords": flow_controller.keywords
+        "keywords": flow_controller.keywords  # Always include current keywords
     })
 
 @app.route("/api/recommendations", methods=["GET"])
@@ -122,11 +123,15 @@ async def voice_interaction():
         
         question = await flow_controller.get_question(next_step)
         audio = await voice_processor.text_to_speech(question)
+        # Always include current keywords in the response
+        current_keywords = await flow_controller.clean_keywords()
+        
         return jsonify({
             "success": True,
             "text": question,
             "next_step": next_step,
-            "audio": audio
+            "audio": audio,
+            "keywords": current_keywords  # Always include current keywords
         })
     except Exception as e:
         logger.error(f"Voice interaction failed: {str(e)}")
@@ -174,9 +179,10 @@ async def get_keywords():
             flow_controller = FlowController()
         
         # Return the current keywords
+        current_keywords = await flow_controller.clean_keywords()
         return jsonify({
             "success": True,
-            "keywords": flow_controller.keywords
+            "keywords": current_keywords
         })
     except Exception as e:
         logger.error(f"Error getting keywords: {str(e)}")
